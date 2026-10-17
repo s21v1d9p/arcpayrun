@@ -8,7 +8,7 @@ I built it for grant programs, DAOs and small teams that pay contributors in bat
 
 - Live app: https://arcpayrun.vercel.app
 - Demo video (1 min 21 s, captioned, no sound): https://arcpayrun.vercel.app/demo.mp4
-- Receipt for the first mainnet payout: https://arcpayrun.vercel.app/?tx=0xc6a721b4541aad27bc28c6df4a34e916e7d58aa3b510f3e9373d8748ca9acb06
+- Receipt for the first mainnet payout: https://arcpayrun.vercel.app/?tx=0xc6a721b4541aad27bc28c6df4a34e916e7d58aa3b510f3e9373d8748ca9acb06&block=24213326
 
 ## Why Arc
 
@@ -31,7 +31,7 @@ The first mainnet payout went through the live app and sent 0.01 USDC to two add
 2. The app checks every address, rejects duplicates, allows at most 6 decimal places and caps the list at 25 recipients. It doesn't store the list.
 3. Connect a wallet and click Review batch. The list is sent through this site's `/arc-rpc` proxy (or straight to Arc's public RPC if the proxy fails) for the gas estimate. Before you can confirm, the app checks that you are on Arc mainnet, that the contract address holds the expected contract code, and that your balance covers the total plus gas.
 4. Your wallet signs one `pay(recipients, amounts)` call with the exact total.
-5. The app only reports success after the receipt contains a matching `Paid` event for every recipient. The `?tx=0x...` link rebuilds the receipt from Arc RPC, so anyone who opens it sees the onchain data rather than something stored by the app.
+5. The app only reports success after the receipt contains a matching `Paid` event for every recipient. The `?tx=0x...` link rebuilds the receipt from Arc RPC, so anyone who opens it sees the onchain data rather than something stored by the app. Arc's public RPC does not always find older transactions by hash, so receipt links also carry the block number (`&block=`). For an older link without one, the app asks Arc Explorer which block the transaction is in, then still reads the receipt itself from Arc RPC.
 
 Recipient addresses and amounts are public once the transaction is sent.
 

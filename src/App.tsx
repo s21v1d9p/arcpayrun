@@ -56,9 +56,12 @@ function App() {
   const params = useMemo(() => new URLSearchParams(window.location.search), [])
   const initialTx = params.get('tx')
   const initialPayer = params.get('payer')
+  const initialBlock = params.get('block')
   const payerValid = !initialPayer || isAddress(initialPayer)
-  const linkedHash = initialTx && /^0x[0-9a-fA-F]{64}$/.test(initialTx) && payerValid ? initialTx as Hash : null
+  const blockValid = !initialBlock || /^[1-9][0-9]{0,15}$/.test(initialBlock)
+  const linkedHash = initialTx && /^0x[0-9a-fA-F]{64}$/.test(initialTx) && payerValid && blockValid ? initialTx as Hash : null
   const linkedPayer = initialPayer && isAddress(initialPayer) ? getAddress(initialPayer) : undefined
+  const linkedBlock = initialBlock && blockValid ? BigInt(initialBlock) : undefined
   const [mode, setMode] = useState<Mode>('manual')
   const [rows, setRows] = useState<PayoutInput[]>([{ address: '', amount: '' }])
   const [csv, setCsv] = useState('')
@@ -67,7 +70,13 @@ function App() {
   const [quoteFor, setQuoteFor] = useState('')
   const [stage, setStage] = useState<Stage>(linkedHash ? 'loading' : 'idle')
   const [error, setError] = useState(
-    !payerValid ? 'Invalid payer address in share link' : initialTx && !linkedHash ? 'Invalid transaction hash in share link' : '',
+    !payerValid
+      ? 'Invalid payer address in share link'
+      : !blockValid
+      ? 'Invalid block number in share link'
+      : initialTx && !linkedHash
+      ? 'Invalid transaction hash in share link'
+      : '',
   )
   const [hash, setHash] = useState<Hash | null>(linkedHash)
   const [payment, setPayment] = useState<PaymentResult | null>(null)
@@ -106,7 +115,7 @@ function App() {
   useEffect(() => {
     if (!linkedHash) return
     let active = true
-    loadPayment(linkedHash, linkedPayer)
+    loadPayment(linkedHash, linkedPayer, linkedBlock)
       .then((result) => {
         if (active) {
           setPayment(result)
@@ -123,7 +132,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [linkedHash, linkedPayer])
+  }, [linkedHash, linkedPayer, linkedBlock])
 
   useEffect(() => {
     let active = true
@@ -343,7 +352,8 @@ function App() {
     setStage('loading')
     setError('')
     try {
-      const result = await loadPayment(hash, safe?.address ?? linkedPayer)
+      const linked = hash === linkedHash
+      const result = await loadPayment(hash, safe?.address ?? (linked ? linkedPayer : undefined), linked ? linkedBlock : undefined)
       const payments = submittedBatch ? matchingRun(result.runs, submittedBatch) : result.payments
       if (safeTxHash) forgetPendingPayout(safeTxHash)
       setPayment({ ...result, payments })
@@ -359,7 +369,7 @@ function App() {
     if (!hash) return
     try {
       await navigator.clipboard.writeText(
-        `${window.location.origin}${window.location.pathname}?tx=${hash}${payment?.executor ? `&payer=${payment.sender}` : ''}`,
+        `${window.location.origin}${window.location.pathname}?tx=${hash}${payment?.executor ? `&payer=${payment.sender}` : ''}${payment ? `&block=${payment.blockNumber}` : ''}`,
       )
     } catch (cause) {
       setError(`Could not copy receipt link: ${errorMessage(cause)}`)

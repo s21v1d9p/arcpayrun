@@ -2,12 +2,15 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
+  formatTransactionReceipt,
   formatUnits,
   getAddress,
   isAddress,
+  numberToHex,
+  TransactionReceiptNotFoundError,
   zeroAddress,
 } from 'viem'
-import type { Address, Hash } from 'viem'
+import type { Address, Hash, TransactionReceipt } from 'viem'
 import type { Batch } from './payouts'
 import { batchAbi, parsePaidReceipt, parsePaidRuns, payerOf } from './receipts'
 import type { ConfirmedPayment } from './receipts'
@@ -183,11 +186,46 @@ export async function sendPayment(
   }
 }
 
+// undefined: Arc Explorer could not be reached. null: it answered but has no block for the transaction,
+// because it is unknown or still pending.
+async function explorerBlockNumber(hash: Hash): Promise<bigint | null | undefined> {
+  try {
+    const response = await fetch(`${arcMainnet.blockExplorers.default.url}/api/v2/transactions/${hash}`)
+    if (response.status === 404) return null
+    if (!response.ok) return undefined
+    const { block_number: block } = (await response.json()) as { block_number?: unknown }
+    return typeof block === 'number' && Number.isSafeInteger(block) && block > 0 ? BigInt(block) : null
+  } catch {
+    return undefined
+  }
+}
+
+// Arc's public RPC does not always find older transactions by hash. Older receipts are still served per block, so the
+// block comes from the receipt link or from Arc Explorer, and the receipt itself is still read from Arc RPC.
+async function findReceipt(hash: Hash, block?: bigint): Promise<TransactionReceipt> {
+  try {
+    return await publicClient.getTransactionReceipt({ hash })
+  } catch (cause) {
+    if (!(cause instanceof TransactionReceiptNotFoundError)) throw cause
+    const blockNumber = block ?? (await explorerBlockNumber(hash))
+    if (blockNumber === null) throw cause
+    if (blockNumber === undefined) {
+      throw new Error(
+        "No receipt found on Arc RPC. The transaction may still be pending. If it is older, check it on Arc Explorer, because Arc's public RPC does not always find older transactions by hash",
+      )
+    }
+    const receipts = await publicClient.request({ method: 'eth_getBlockReceipts', params: [numberToHex(blockNumber)] })
+    const receipt = receipts?.find((candidate) => candidate.transactionHash.toLowerCase() === hash.toLowerCase())
+    if (!receipt) throw new Error(`Block ${blockNumber} on Arc does not contain this transaction`)
+    return formatTransactionReceipt(receipt)
+  }
+}
+
 // The payer is read from the pinned contract's Paid events, so payouts sent through a Safe verify too.
-export async function loadPayment(hash: Hash, payer?: Address) {
+export async function loadPayment(hash: Hash, payer?: Address, block?: bigint) {
   const contract = configuredContract()
   await assertPayoutContract(contract)
-  const receipt = await publicClient.getTransactionReceipt({ hash })
+  const receipt = await findReceipt(hash, block)
   const sender = payerOf(receipt, contract, payer)
   const runs = parsePaidRuns(receipt, contract, sender)
   const executor = getAddress(receipt.from)

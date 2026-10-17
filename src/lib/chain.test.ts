@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { encodeAbiParameters, getAddress, pad, toEventSelector } from 'viem'
+import { encodeAbiParameters, getAddress, pad, toEventSelector, TransactionReceiptNotFoundError } from 'viem'
 import {
   assertMatchesReviewedBatch,
   connectWallet,
@@ -51,6 +51,7 @@ afterEach(() => {
   delete window.ethereum
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
 })
 
 describe('Arc wallet setup', () => {
@@ -354,5 +355,106 @@ describe('shared receipt verification', () => {
     const result = await loadPayment(hash)
     expect(result.sender).toBe(getAddress(lowercaseSender))
     expect(result.executor).toBeNull()
+  })
+})
+
+describe('receipts that Arc RPC does not find by hash', () => {
+  const hash = `0x${'f'.repeat(64)}` as const
+  const otherHash = `0x${'1'.repeat(64)}` as const
+  const blockHash = `0x${'9'.repeat(64)}` as const
+  const rpcReceipt = (transactionHash: `0x${string}`) => ({
+    transactionHash,
+    blockHash,
+    blockNumber: '0x171774e',
+    transactionIndex: '0x0',
+    from: sender,
+    to: contract,
+    status: '0x1',
+    type: '0x2',
+    gasUsed: '0x1',
+    cumulativeGasUsed: '0x1',
+    effectiveGasPrice: '0x1',
+    contractAddress: null,
+    logsBloom: '0x',
+    logs: [
+      {
+        address: contract,
+        topics: [
+          toEventSelector('event Paid(address indexed sender, address indexed recipient, uint256 amount, uint256 index)'),
+          pad(sender),
+          pad(recipient),
+        ],
+        data: encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [10n, 0n]),
+        blockHash,
+        blockNumber: '0x171774e',
+        logIndex: '0x0',
+        transactionHash,
+        transactionIndex: '0x0',
+        removed: false,
+      },
+    ],
+  })
+
+  function lookupMissesHash(blockReceipts: unknown[]) {
+    vi.stubEnv('VITE_ARC_BATCH_ADDRESS', contract)
+    vi.spyOn(publicClient, 'getCode').mockResolvedValue(ARC_BATCH_RUNTIME_CODE)
+    vi.spyOn(publicClient, 'getTransactionReceipt').mockRejectedValue(new TransactionReceiptNotFoundError({ hash }))
+    return vi.spyOn(publicClient, 'request').mockImplementation((async ({ method }: { method: string }) => {
+      if (method === 'eth_getBlockReceipts') return blockReceipts
+      throw new Error(`Unexpected RPC: ${method}`)
+    }) as never)
+  }
+
+  it('reads the receipt from the block named in the link and checks it as usual', async () => {
+    const request = lookupMissesHash([rpcReceipt(otherHash), rpcReceipt(hash)])
+    const explorer = vi.fn()
+    vi.stubGlobal('fetch', explorer)
+
+    const result = await loadPayment(hash, undefined, 24213326n)
+    expect(request).toHaveBeenCalledWith({ method: 'eth_getBlockReceipts', params: ['0x171774e'] })
+    expect(explorer).not.toHaveBeenCalled()
+    expect(result.sender).toBe(sender)
+    expect(result.executor).toBeNull()
+    expect(result.payments).toEqual([{ recipient, amount: 10n, index: 0 }])
+    expect(result.blockNumber).toBe(24213326n)
+  })
+
+  it('asks Arc Explorer only for the block number when the link has none', async () => {
+    lookupMissesHash([rpcReceipt(hash)])
+    const explorer = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ block_number: 24213326 }) })
+    vi.stubGlobal('fetch', explorer)
+
+    const result = await loadPayment(hash)
+    expect(explorer).toHaveBeenCalledWith(`https://explorer.arc.io/api/v2/transactions/${hash}`)
+    expect(result.payments).toEqual([{ recipient, amount: 10n, index: 0 }])
+  })
+
+  it('does not accept a block that does not hold the transaction', async () => {
+    const request = lookupMissesHash([rpcReceipt(otherHash)])
+    await expect(loadPayment(hash, undefined, 24213326n)).rejects.toThrow(/block 24213326 on arc does not contain this transaction/i)
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ block_number: 24213326 }) }))
+    await expect(loadPayment(hash)).rejects.toThrow(/block 24213326 on arc does not contain this transaction/i)
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the plain not-found error when Arc Explorer has no block for the transaction', async () => {
+    const request = lookupMissesHash([rpcReceipt(hash)])
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({ message: 'Not found' }) }))
+    await expect(loadPayment(hash)).rejects.toBeInstanceOf(TransactionReceiptNotFoundError)
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ block_number: null }) }))
+    await expect(loadPayment(hash)).rejects.toBeInstanceOf(TransactionReceiptNotFoundError)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('says the transaction may be pending or older when Arc Explorer cannot be reached', async () => {
+    const request = lookupMissesHash([])
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    const failure = loadPayment(hash)
+    await expect(failure).rejects.toThrow(/may still be pending/i)
+    await expect(failure).rejects.toThrow(/does not always find older transactions by hash/i)
+    expect(request).not.toHaveBeenCalled()
   })
 })

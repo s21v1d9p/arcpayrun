@@ -236,12 +236,76 @@ describe('Arc Payrun interface', () => {
     })
     render(<App />)
     expect(await screen.findByRole('heading', { name: /all payments confirmed/i })).toBeTruthy()
-    expect(load).toHaveBeenCalledWith(hash, safeAddress)
+    expect(load).toHaveBeenCalledWith(hash, safeAddress, undefined)
     cleanup()
 
     window.history.replaceState(null, '', `/?tx=${hash}&payer=nope`)
     render(<App />)
     expect(screen.getByRole('alert').textContent).toMatch(/invalid payer/i)
+  })
+
+  it('uses the block in a receipt link and keeps it in the copied link', async () => {
+    const hash = `0x${'d'.repeat(64)}` as const
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    window.history.replaceState(null, '', `/?tx=${hash}&block=42`)
+    const load = vi.spyOn(chain, 'loadPayment').mockResolvedValue({
+      hash,
+      sender: alice,
+      executor: null,
+      payments: [{ recipient: bob, amount: 10_000_000_000_000_000n, index: 0 }],
+      runs: [[{ recipient: bob, amount: 10_000_000_000_000_000n, index: 0 }]],
+      blockNumber: 42n,
+    })
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: /all payments confirmed/i })).toBeTruthy()
+    expect(load).toHaveBeenCalledWith(hash, undefined, 42n)
+    fireEvent.click(screen.getByRole('button', { name: /copy receipt link/i }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/?tx=${hash}&block=42`))
+    Reflect.deleteProperty(navigator, 'clipboard')
+  })
+
+  it('rejects a malformed block number in a receipt link before any lookup', () => {
+    window.history.replaceState(null, '', `/?tx=0x${'d'.repeat(64)}&block=12abc`)
+    const load = vi.spyOn(chain, 'loadPayment')
+    render(<App />)
+    expect(screen.getByRole('alert').textContent).toMatch(/invalid block number/i)
+    expect(load).not.toHaveBeenCalled()
+  })
+
+  it('does not carry the payer or block from a receipt link over to a new payout', async () => {
+    const linked = `0x${'c'.repeat(64)}` as const
+    const sent = `0x${'a'.repeat(64)}` as const
+    window.history.replaceState(null, '', `/?tx=${linked}&payer=${safeAddress}&block=42`)
+    vi.spyOn(chain, 'configuredContract').mockReturnValue(payoutContract)
+    vi.spyOn(chain, 'connectWallet').mockResolvedValue(alice)
+    vi.spyOn(chain, 'preparePayment').mockResolvedValue({
+      account: alice,
+      contract: payoutContract,
+      balance: 3_000_000_000_000_000_000n,
+      gasLimit: 100_000n,
+      maxFeePerGas: 20_000_000_000n,
+      maxPriorityFeePerGas: 0n,
+      maxNetworkFee: 2_000_000_000_000_000n,
+    })
+    vi.spyOn(chain, 'sendPayment').mockImplementation(async (_batch, _quote, onSubmitted) => {
+      onSubmitted(sent)
+      throw new Error('Timed out waiting for confirmation')
+    })
+    const load = vi.spyOn(chain, 'loadPayment').mockResolvedValue(safeReceipt(linked))
+
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: /start new batch/i }))
+    enterBobForOne()
+    await user.click(screen.getByRole('button', { name: /connect wallet/i }))
+    await user.click(screen.getByRole('button', { name: /review batch/i }))
+    await user.click(screen.getByRole('button', { name: /confirm & pay/i }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not verified yet/i))
+
+    await user.click(screen.getByRole('button', { name: /retry receipt/i }))
+    await waitFor(() => expect(load).toHaveBeenLastCalledWith(sent, undefined, undefined))
   })
 
   it('states plainly where recipient data goes', () => {
